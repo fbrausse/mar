@@ -7,6 +7,7 @@
 #include <sys/stat.h>		/* stat() */
 #include <libgen.h>		/* basename() */
 
+#include <gio/gio.h>
 #include <gmime/gmime.h>
 
 #define DEFAULT_ENC		"quoted-printable"
