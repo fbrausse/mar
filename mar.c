@@ -409,7 +409,7 @@ FMODS are any of:\n\
   -n NAME  use string NAME for FILE in message, defaults to basename of FILE,\n\
            except for inline parts\n\
 \n\
-FILE can be the name of an existing file, pipe or \"-\" to denote stdin\n\
+FILE can be the name of an existing file, pipe or \"-\" to denote stdin.\n\
 \n\
 MIME archiver, written by Franz Brauße <dev@karlchenofhell.org>. License: GPLv2.\n\
 "
@@ -477,14 +477,14 @@ int main(int argc, char **argv)
 		case '0': encoding_constraint = GMIME_ENCODING_CONSTRAINT_BINARY; break;
 		case '7': encoding_constraint = GMIME_ENCODING_CONSTRAINT_7BIT; break;
 		case '8': encoding_constraint = GMIME_ENCODING_CONSTRAINT_8BIT; break;
-		case 'f':
-			if (fstr)
-				FATAL(1,"only one specification of '-f' is supported\n");
 		case 'b':
 			if (!msg)
 				FATAL(1,"invalid mode of operation: not creating a MIME message\n");
 			g_mime_message_add_recipient(msg, GMIME_RECIPIENT_TYPE_BCC, NULL, optarg);
 			break;
+		case 'f':
+			if (fstr)
+				FATAL(1,"only one specification of '-f' is supported\n");
 		case 'B':
 		case 'p':
 		case 'P':
