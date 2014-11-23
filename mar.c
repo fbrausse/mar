@@ -47,7 +47,6 @@ static int                     verbosity = 0;
 static int                     extract_to_stdout = 0;
 static const char             *preface       = NULL;
 static const char             *postface      = NULL;
-static const char             *subject       = NULL;
 static const char             *boundary      = NULL;
 static const char             *next_charset  = NULL;
 static const char             *next_desc     = NULL;
@@ -57,6 +56,7 @@ static const char             *next_mimetype = NULL;
 static       char             *next_name     = NULL;
 static enum action             action    = ACTION_NONE;
 static enum overwrite          overwrite = OVERWRITE_NONE;
+static GMimeMessage           *msg = NULL;
 
 #define OPT_ACTIONS	"ctx" /* "Ar" */
 #define OPT_FMODS	"C:d:e:im:n:"
@@ -374,10 +374,12 @@ ACTION is one of:\n\
   -x       extract contents of MIME message\n\
 \n\
 OPTS are any of:\n\
+  -0       encode for binary-safe channel, don't force any encoding\n\
   -7       encode for 7bit channel, encode data 7bit-clean; this is the default\n\
   -8       encode for 8bit channel, just encode embedded zeros\n\
-  -b       encode for binary-safe channel, don't force any encoding\n\
+  -b BCC   \n\
   -B BOUN  explicitely specify 'boundary' delimiter of the MIME message\n\
+  -c CC    \n\
   -f FILE  read/write MIME message from/to FILE instead of stdin/stdout\n\
   -h       display this help message\n\
   -H       dereference symbolic links instead of aborting\n\
@@ -385,6 +387,7 @@ OPTS are any of:\n\
   -p PRE   use PRE as multipart preface text\n\
   -P POST  use POST as multipart postface text\n\
   -s SUBJ  insert a 'Subject'-Header\n\
+  -t TO    mail address of recipient, insert as 'To'-Header\n\
   -u       unlink existing files before writing\n\
   -U       overwrite (and don't unlink) existing files during extraction\n\
            (unsafe: this makes a difference for existing symlinks)\n\
@@ -445,23 +448,43 @@ int main(int argc, char **argv)
 	int opt;
 	for (int next_arg_f = 0;;) {
 		int oldind = optind;
-		opt = getopt(argc, argv, optind == 1 ? ":78bBfhHOpPsuUv" OPT_ACTIONS
-		                                     : ":78bB:f:hHOup:P:s:Uv" OPT_FMODS);
+		opt = getopt(argc, argv, optind == 1 ? ":078BfhHOpPsuUv" OPT_ACTIONS
+		                                     : ":078B:b:c:f:hHOup:P:s:t:Uv" OPT_FMODS);
 		switch (opt) {
 		/* actions */
 //		case 'A': set_action(ACTION_CONCAT); break;
-		case 'c': set_action(ACTION_CREATE); break;
+		case 'c':
+			if (oldind == 1) {
+				set_action(ACTION_CREATE);
+				msg = g_mime_message_new(FALSE);
+			} else if (!msg)
+				FATAL(1,"invalid mode of operation: not creating a MIME message\n");
+			else
+				g_mime_message_add_recipient(msg, GMIME_RECIPIENT_TYPE_CC, NULL, optarg);
+			break;
 //		case 'r': set_action(ACTION_APPEND); break;
-		case 't': set_action(ACTION_LIST); break;
+		case 't':
+			if (oldind == 1)
+				set_action(ACTION_LIST);
+			else if (!msg)
+				FATAL(1,"invalid mode of operation: not creating a MIME message\n");
+			else
+				g_mime_message_add_recipient(msg, GMIME_RECIPIENT_TYPE_TO, NULL, optarg);
+			break;
 		case 'x': set_action(ACTION_EXTRACT); break;
 
 		/* options */
+		case '0': encoding_constraint = GMIME_ENCODING_CONSTRAINT_BINARY; break;
 		case '7': encoding_constraint = GMIME_ENCODING_CONSTRAINT_7BIT; break;
 		case '8': encoding_constraint = GMIME_ENCODING_CONSTRAINT_8BIT; break;
-		case 'b': encoding_constraint = GMIME_ENCODING_CONSTRAINT_BINARY; break;
 		case 'f':
 			if (fstr)
 				FATAL(1,"only one specification of '-f' is supported\n");
+		case 'b':
+			if (!msg)
+				FATAL(1,"invalid mode of operation: not creating a MIME message\n");
+			g_mime_message_add_recipient(msg, GMIME_RECIPIENT_TYPE_BCC, NULL, optarg);
+			break;
 		case 'B':
 		case 'p':
 		case 'P':
@@ -499,7 +522,7 @@ int main(int argc, char **argv)
 			case 'f': fstr     = arg; break;
 			case 'p': preface  = arg; break;
 			case 'P': postface = arg; break;
-			case 's': subject  = arg; break;
+			case 's': g_mime_message_set_subject(msg, arg); break;
 			}
 			next_arg_f = 0;
 		}
@@ -518,10 +541,7 @@ int main(int argc, char **argv)
 
 		mar = mar_create(argc, argv);
 
-		GMimeMessage *msg = g_mime_message_new(FALSE);
 		g_mime_message_set_mime_part(msg, mar);
-		if (subject)
-			g_mime_message_set_subject(msg, subject);
 
 		s = fstr ? g_mime_stream_file_new_for_path(fstr, "wb")
 		         : g_mime_stream_file_new(stdout);
