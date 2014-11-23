@@ -26,9 +26,25 @@ So far, it has only been tested on Linux boxes, where it is developed and
 deployed.
 
 
+Usage
+~~~~~
+I use mar to extract attached patches from mails to store them at some place
+where I remember to look. The second and more important use case for me is to
+scriptedly send mails to students with stuff attached, like so:
+
+	$ echo "$BODY" | mar cs "$SUBJ" -t "$TO" -i - "${FILES[@]}" | \
+	> nullmailer-inject
+
+(This command line uses the nullmailer [5] relay-only MTA, but any other MTA
+ expecting pre-formatted mails on stdin should work fine.)
+
+Because ordinary mails w/o attachments can easily be sent using the mail(1)
+command, there is no support for creating non-multipart MIME messages in mar.
+
 References
 ~~~~~~~~~~
 [1] <http://spruce.sourceforge.net/gmime/>
 [2] <http://www.gtk.org/>
 [3] <http://www.gtk.org/>
 [4] <http://ftp.funet.fi/pub/unix/mail/metamail/>
+[5] <http://untroubled.org/nullmailer/>
