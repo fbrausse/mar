@@ -271,7 +271,7 @@ static void mar_extract_cb(GMimeObject *parent, GMimeObject *part, gpointer user
 	GMimePart *p = GMIME_PART(part);
 	GMimeDataWrapper *w = g_mime_part_get_content_object(p);
 	if (!w) {
-		if (verbosity > 0)
+		if (verbosity > 1)
 			LOG("warning: skipping MIME part w/o content\n");
 		return;
 	} 
@@ -307,10 +307,15 @@ static void mar_extract_cb(GMimeObject *parent, GMimeObject *part, gpointer user
 		FATAL(1,"refusing to overwrite existing '%s'\n", filename_base);
 	}
 
+	if (verbosity > 0)
+		LOG("%s\n", filename_base);
+
 	GMimeStream *s = g_mime_stream_filter_new(g_mime_data_wrapper_get_stream(w));
 	GMimeFilter *f = g_mime_filter_basic_new(g_mime_data_wrapper_get_encoding(w), FALSE);
 	g_mime_stream_filter_add(GMIME_STREAM_FILTER(s), f);
 	GMimeStream *o = g_mime_stream_file_new_for_path(filename_base, "wb");
+	if (!o)
+		FATAL(1,"error opening '%s' for writing: %s\n", filename_base, strerror(errno));
 	ssize_t r = g_mime_stream_write_to_stream(s, o);
 	if (r == -1)
 		FATAL(1,"error writing '%s': %s\n", filename_base, strerror(errno));
@@ -487,6 +492,9 @@ int main(int argc, char **argv)
 	case ACTION_EXTRACT: {
 		s = fstr ? g_mime_stream_file_new_for_path(fstr, "rb")
 		         : g_mime_stream_file_new(stdin);
+		if (!s)
+			FATAL(1,"error opening '%s' for reading: %s\n",
+			      fstr ? fstr : "stdin", strerror(errno));
 
 		GMimeObjectForeachFunc cb;
 		cb = (action == ACTION_LIST) ? mar_list_cb : mar_extract_cb;
@@ -507,9 +515,10 @@ int main(int argc, char **argv)
 			g_object_unref(mar);
 		}
 		g_object_unref(p);
+		g_object_unref(s);
 		break;
 	}
 	}
 
-	
+	return 0;
 }
