@@ -45,16 +45,21 @@ static int                     dereference_symlinks = 0;
 //static int recurse_subdirs = 0;
 static int                     verbosity = 0;
 static int                     extract_to_stdout = 0;
+static const char             *preface       = NULL;
+static const char             *postface      = NULL;
+static const char             *subject       = NULL;
+static const char             *boundary      = NULL;
 static const char             *next_charset  = NULL;
 static const char             *next_desc     = NULL;
 static GMimeContentEncoding    next_encoding = GMIME_CONTENT_ENCODING_DEFAULT;
+static int                     next_inline   = 0;
 static const char             *next_mimetype = NULL;
 static       char             *next_name     = NULL;
 static enum action             action    = ACTION_NONE;
 static enum overwrite          overwrite = OVERWRITE_NONE;
 
 #define OPT_ACTIONS	"ctx" /* "Ar" */
-#define OPT_FMODS	"C:d:e:m:n:"
+#define OPT_FMODS	"C:d:e:im:n:"
 
 static void set_action(enum action a)
 {
@@ -81,38 +86,39 @@ static void set_encoding(const char *e)
 
 static GMimePart * mar_create_part(char *path)
 {
-	char *orgpath = path;
-	static char pathbuf[PATH_MAX+1];
 	GMimeStream *stream = NULL;
-	while (1) {
-		struct stat st;
-		if (lstat(path, &st))
+	struct stat st;
+	if (!strcmp(path, "-")) {
+		stream = g_mime_stream_buffer_new(g_mime_stream_file_new(stdin),
+		                                  GMIME_STREAM_BUFFER_CACHE_READ);
+	} else if ((dereference_symlinks ? stat : lstat)(path, &st)) {
 			FATAL(2,"error stat'ing path '%s' to input: %s\n",
 			      path,strerror(errno));
-		if (S_ISLNK(st.st_mode)) {
-			if (!dereference_symlinks)
-				FATAL(1,"refusing to handle symlink '%s' due "
-				      "to '-H' not specified\n", path);
-			ssize_t l = readlink(path, pathbuf, sizeof(pathbuf)-1);
-			if (l < 0)
-				FATAL(1,"error reading symlink '%s': %s\n",
-				      path,strerror(errno));
-			pathbuf[l] = '\0';
-			path = pathbuf;
-			continue;
-		}
-		if (S_ISREG(st.st_mode)) {
-			stream = g_mime_stream_file_new_for_path(path, "rb");
-			break;
-		}
-		FATAL(1,"error: cannot handle non-regular file '%s'\n",path);
-	};
+	} else if (S_ISLNK(st.st_mode)) {
+		FATAL(1,"refusing to handle symlink '%s' due "
+		      "to '-H' not specified\n", path);
+	} else if (S_ISREG(st.st_mode)) {
+		stream = g_mime_stream_file_new_for_path(path, "rb");
+	} else if (S_ISFIFO(st.st_mode)) {
+		stream = g_mime_stream_buffer_new(g_mime_stream_file_new_for_path(path, "rb"),
+		                                  GMIME_STREAM_BUFFER_CACHE_READ);
+	} else {
+		FATAL(1,"error: cannot handle non-regular file '%s'\n",
+		      path);
+	}
 
 	GMimePart *part = g_mime_part_new();
 
+	const char *disposition;
 	if (!next_name)
-		next_name = basename(orgpath);
-	g_mime_part_set_filename(part, next_name);
+		next_name = basename(path);
+	if (next_inline)
+		disposition = GMIME_DISPOSITION_INLINE;
+	else {
+		disposition = GMIME_DISPOSITION_ATTACHMENT;
+		g_mime_part_set_filename(part, next_name);
+	}
+	g_mime_object_set_disposition(GMIME_OBJECT(part), disposition);
 
 	if (next_desc)
 		g_mime_part_set_content_description(part, next_desc);
@@ -136,7 +142,7 @@ static GMimePart * mar_create_part(char *path)
 		    gio_content_type, gio_mime_type);
 
 	if (!have_type)
-		next_mimetype = have_cs ? DEFAULT_MIMETYPE_TEXT : gio_mime_type;
+		next_mimetype = next_inline || have_cs ? DEFAULT_MIMETYPE_TEXT : gio_mime_type;
 
 	GMimeContentType *mt = g_mime_content_type_new_from_string(next_mimetype);
 	GMimeContentType *gio_mt = g_mime_content_type_new_from_string(gio_mime_type);
@@ -174,6 +180,12 @@ static GMimePart * mar_create_part(char *path)
 static GMimeObject * mar_create(int argc, char **argv)
 {
 	GMimeMultipart *mpart = g_mime_multipart_new();
+	if (boundary)
+		g_mime_multipart_set_boundary(mpart, boundary);
+	if (preface)
+		g_mime_multipart_set_preface(mpart, preface);
+	if (postface)
+		g_mime_multipart_set_postface(mpart, postface);
 
 	do {
 		GMimePart *part = mar_create_part(argv[optind++]);
@@ -182,6 +194,7 @@ static GMimeObject * mar_create(int argc, char **argv)
 		next_charset = NULL;
 		next_desc = NULL;
 		next_encoding = GMIME_CONTENT_ENCODING_DEFAULT;
+		next_inline = 0;
 		next_mimetype = NULL;
 		next_name = NULL;
 
@@ -192,6 +205,7 @@ static GMimeObject * mar_create(int argc, char **argv)
 			case 'C': next_charset = optarg; break;
 			case 'd': next_desc = optarg; break;
 			case 'e': set_encoding(optarg); break;
+			case 'i': next_inline = 1; break;
 			case 'm': next_mimetype = optarg; break;
 			case 'n': next_name = optarg; break;
 
@@ -363,10 +377,14 @@ OPTS are any of:\n\
   -7       encode for 7bit channel, encode data 7bit-clean; this is the default\n\
   -8       encode for 8bit channel, just encode embedded zeros\n\
   -b       encode for binary-safe channel, don't force any encoding\n\
+  -B BOUN  explicitely specify 'boundary' delimiter of the MIME message\n\
   -f FILE  read/write MIME message from/to FILE instead of stdin/stdout\n\
   -h       display this help message\n\
   -H       dereference symbolic links instead of aborting\n\
   -O       extract files to stdout\n\
+  -p PRE   use PRE as multipart preface text\n\
+  -P POST  use POST as multipart postface text\n\
+  -s SUBJ  insert a 'Subject'-Header\n\
   -u       unlink existing files before writing\n\
   -U       overwrite (and don't unlink) existing files during extraction\n\
            (unsafe: this makes a difference for existing symlinks)\n\
@@ -380,11 +398,15 @@ FMODS are any of:\n\
   -e ENC   specifies the content-transfer-encoding to use: 7bit, 8bit, binary,\n\
            base64, quoted-printable, uuencode;\n\
            defaults to '" DEFAULT_ENC "' for TYPE 'text/*', 'base64' otherwise\n\
+  -i       disposition this part as 'inline', implies 'text/plain' (if not set)\n\
   -m TYPE  specifies the MIME-type of following file argument (only for -c, -r);\n\
            if not given, it will be guessed using libmagic(3) (if available) or\n\
            GIO (if available), defaults to '" DEFAULT_MIMETYPE "' except\n\
            for the case described for option '-e'\n\
-  -n NAME  use string NAME for FILE in message, defaults to basename of FILE\n\
+  -n NAME  use string NAME for FILE in message, defaults to basename of FILE,\n\
+           except for inline parts\n\
+\n\
+FILE can be the name of an existing file, pipe or \"-\" to denote stdin\n\
 \n\
 MIME archiver, written by Franz Brauße <dev@karlchenofhell.org>. License: GPLv2.\n\
 "
@@ -423,8 +445,8 @@ int main(int argc, char **argv)
 	int opt;
 	for (int next_arg_f = 0;;) {
 		int oldind = optind;
-		opt = getopt(argc, argv, optind == 1 ? ":78bfhHOuUv" OPT_ACTIONS
-		                                     : ":78bf:hHOuUv" OPT_FMODS);
+		opt = getopt(argc, argv, optind == 1 ? ":78bBfhHOpPsuUv" OPT_ACTIONS
+		                                     : ":78bB:f:hHOup:P:s:Uv" OPT_FMODS);
 		switch (opt) {
 		/* actions */
 //		case 'A': set_action(ACTION_CONCAT); break;
@@ -438,12 +460,15 @@ int main(int argc, char **argv)
 		case '8': encoding_constraint = GMIME_ENCODING_CONSTRAINT_8BIT; break;
 		case 'b': encoding_constraint = GMIME_ENCODING_CONSTRAINT_BINARY; break;
 		case 'f':
-			if (next_arg_f || fstr)
+			if (fstr)
 				FATAL(1,"only one specification of '-f' is supported\n");
-			if (oldind == 1)
-				next_arg_f = 1;
-			else
-				fstr = optarg;
+		case 'B':
+		case 'p':
+		case 'P':
+		case 's':
+			if (next_arg_f)
+				FATAL(1,"only one of '-BfpPs' may be specified in the first parameter\n");
+			next_arg_f = opt;
 			break;
 		case 'H': dereference_symlinks = 1; break;
 		case 'h': FATAL_DO(0,print_help());
@@ -457,6 +482,7 @@ int main(int argc, char **argv)
 		case 'C': next_charset = optarg; break;
 		case 'd': next_desc = optarg; break;
 		case 'e': set_encoding(optarg); break;
+		case 'i': next_inline = 1; break;
 		case 'm': next_mimetype = optarg; break;
 		case 'n': next_name = optarg; break;
 
@@ -465,8 +491,16 @@ int main(int argc, char **argv)
 		}
 		if (next_arg_f && optind != oldind) {
 			if (optind >= argc)
-				FATAL(1,"option '-f' expects a filename argument\n");
-			fstr = argv[optind++];
+				FATAL(1,"option '-%c' expects a parameter\n",
+				      next_arg_f);
+			char *arg = oldind == 1 ? argv[optind++] : optarg;
+			switch (next_arg_f) {
+			case 'B': boundary = arg; break;
+			case 'f': fstr     = arg; break;
+			case 'p': preface  = arg; break;
+			case 'P': postface = arg; break;
+			case 's': subject  = arg; break;
+			}
 			next_arg_f = 0;
 		}
 		if (opt < 0)
@@ -484,13 +518,18 @@ int main(int argc, char **argv)
 
 		mar = mar_create(argc, argv);
 
+		GMimeMessage *msg = g_mime_message_new(FALSE);
+		g_mime_message_set_mime_part(msg, mar);
+		if (subject)
+			g_mime_message_set_subject(msg, subject);
+
 		s = fstr ? g_mime_stream_file_new_for_path(fstr, "wb")
 		         : g_mime_stream_file_new(stdout);
 
-		g_mime_object_encode(mar, encoding_constraint);
-		g_mime_object_write_to_stream(mar, s);
+		g_mime_object_encode(GMIME_OBJECT(msg), encoding_constraint);
+		g_mime_object_write_to_stream(GMIME_OBJECT(msg), s);
 
-		g_object_unref(mar);
+		g_object_unref(msg);
 		g_object_unref(s);
 		break;
 	}/*
