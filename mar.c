@@ -278,9 +278,11 @@ static void mar_extract_cb(GMimeObject *parent, GMimeObject *part, gpointer user
 
 	GMimeStream *ws = g_mime_data_wrapper_get_stream(w);
 	const char *filename = g_mime_part_get_filename(p);
-	if (!filename)
-		FATAL(1,"skipping MIME part w/o filename, sz: %lld\n",
-		      (long long)g_mime_stream_length(ws));
+	if (!filename) {
+		LOG("skipping MIME part w/o filename, sz: %lld\n",
+		    (long long)g_mime_stream_length(ws));
+		return;
+	}
 
 	char *filename_dup = strdup(filename);
 	char *filename_base = basename(filename_dup);
