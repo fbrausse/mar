@@ -16,7 +16,7 @@ debug: CFLAGS += -g -O0
 debug: LDFLAGS += -g -O0
 
 prof: $(PROGS)
-prof: CFLAGS += -pg
+prof: CFLAGS += -pg -DNDEBUG
 prof: LDFLAGS += -pg
 
 mar.o: mar.c $(wildcard *.h)

@@ -39,19 +39,19 @@ static const char *const encoding_strs[] = {
 //	[GMIME_CONTENT_ENCODING_               ] = "yencode",
 };
 
-static const char *progname;
+static const char             *progname;
 static GMimeEncodingConstraint encoding_constraint = GMIME_ENCODING_CONSTRAINT_7BIT;
-static int dereference_symlinks = 0;
+static int                     dereference_symlinks = 0;
 //static int recurse_subdirs = 0;
-static int verbosity = 0;
-static const char *next_charset = NULL;
-static const char *next_desc = NULL;
-static GMimeContentEncoding next_encoding = GMIME_CONTENT_ENCODING_DEFAULT;
-static const char *next_mimetype = NULL;
-static       char *next_name = NULL;
-static enum action action = ACTION_NONE;
-static enum overwrite overwrite = OVERWRITE_NONE;
-static FILE *fout = NULL;
+static int                     verbosity = 0;
+static int                     extract_to_stdout = 0;
+static const char             *next_charset  = NULL;
+static const char             *next_desc     = NULL;
+static GMimeContentEncoding    next_encoding = GMIME_CONTENT_ENCODING_DEFAULT;
+static const char             *next_mimetype = NULL;
+static       char             *next_name     = NULL;
+static enum action             action    = ACTION_NONE;
+static enum overwrite          overwrite = OVERWRITE_NONE;
 
 #define OPT_ACTIONS	"ctx" /* "Ar" */
 #define OPT_FMODS	"C:d:e:m:n:"
@@ -87,13 +87,16 @@ static GMimePart * mar_create_part(char *path)
 	while (1) {
 		struct stat st;
 		if (lstat(path, &st))
-			FATAL(2,"error stat'ing path '%s' to input: %s\n",path,strerror(errno));
+			FATAL(2,"error stat'ing path '%s' to input: %s\n",
+			      path,strerror(errno));
 		if (S_ISLNK(st.st_mode)) {
 			if (!dereference_symlinks)
-				FATAL(1,"refusing to handle symlink '%s' due to '-H' not specified\n",path);
+				FATAL(1,"refusing to handle symlink '%s' due "
+				      "to '-H' not specified\n", path);
 			ssize_t l = readlink(path, pathbuf, sizeof(pathbuf)-1);
 			if (l < 0)
-				FATAL(1,"error reading symlink '%s': %s\n",path,strerror(errno));
+				FATAL(1,"error reading symlink '%s': %s\n",
+				      path,strerror(errno));
 			pathbuf[l] = '\0';
 			path = pathbuf;
 			continue;
@@ -114,7 +117,8 @@ static GMimePart * mar_create_part(char *path)
 	if (next_desc)
 		g_mime_part_set_content_description(part, next_desc);
 
-	GMimeDataWrapper *data = g_mime_data_wrapper_new_with_stream(stream, GMIME_CONTENT_ENCODING_BINARY);
+	GMimeDataWrapper *data = g_mime_data_wrapper_new_with_stream(stream,
+			GMIME_CONTENT_ENCODING_BINARY);
 	g_object_unref(stream);
 	g_mime_part_set_content_object(part, data);
 	g_object_unref(data);
@@ -126,11 +130,10 @@ static GMimePart * mar_create_part(char *path)
 	gboolean gio_content_type_uncertain;
 	gchar *gio_content_type = g_content_type_guess(path,NULL,0,&gio_content_type_uncertain);
 	gchar *gio_mime_type = g_content_type_get_mime_type(gio_content_type);
-	if (verbosity > 1) {
+	if (verbosity > 1)
 		LOG("%s: gio %s content-type '%s', mime-type '%s'\n",path,
 		    gio_content_type_uncertain ? "guesses" : "identifies",
 		    gio_content_type, gio_mime_type);
-	}
 
 	if (!have_type)
 		next_mimetype = have_cs ? DEFAULT_MIMETYPE_TEXT : gio_mime_type;
@@ -173,7 +176,8 @@ static GMimeObject * mar_create(int argc, char **argv)
 	GMimeMultipart *mpart = g_mime_multipart_new();
 
 	do {
-		g_mime_multipart_add(mpart, GMIME_OBJECT(mar_create_part(argv[optind++])));
+		GMimePart *part = mar_create_part(argv[optind++]);
+		g_mime_multipart_add(mpart, GMIME_OBJECT(part));
 
 		next_charset = NULL;
 		next_desc = NULL;
@@ -192,7 +196,7 @@ static GMimeObject * mar_create(int argc, char **argv)
 			case 'n': next_name = optarg; break;
 
 			case ':': FATAL(1,"option '-%c' expects a parameter\n",optopt);
-			case '?': FATAL(1,"unknown option '-%c'\n", optopt);
+			case '?': FATAL(1,"unknown option '-%c'\n",optopt);
 			}
 	} while (optind < argc);
 
@@ -218,8 +222,9 @@ static int mar_idx_find_filename(struct mar_idx *idx, const char *filename)
 	return 0;
 }
 
-static void mar_list_cb(GMimeObject *parent, GMimeObject *part, gpointer user_data)
-{
+static void mar_list_cb(
+	GMimeObject *parent, GMimeObject *part, gpointer user_data
+) {
 	GMimeContentType *content_type = g_mime_object_get_content_type(part);
 	char *content_type_str = g_mime_content_type_to_string(content_type);
 	const char *disposition = g_mime_object_get_disposition(part);
@@ -241,26 +246,29 @@ static void mar_list_cb(GMimeObject *parent, GMimeObject *part, gpointer user_da
 		description = g_mime_part_get_content_description(GMIME_PART(part));
 		encoding = g_mime_part_get_content_encoding(GMIME_PART(part));
 		filename = g_mime_part_get_filename(GMIME_PART(part));
-		data_stream = g_mime_data_wrapper_get_stream(g_mime_part_get_content_object(GMIME_PART(part)));
+		data_stream = g_mime_data_wrapper_get_stream(
+				g_mime_part_get_content_object(GMIME_PART(part)));
 	} else if (GMIME_IS_MULTIPART(part))
 		type = "multipart";
 	else if(GMIME_IS_MESSAGE_PART(part))
 		type = "message-part";
 
 	if (verbosity > 0 || (filename && mar_idx_find_filename(idx, filename)))
-		LOG("%u/%u: type '%s', content type '%s', disposition: '%s', id: '%s', "
-		    "filename: '%s', description: '%s', encoding: '%s', size: %lld\n",
-		    idx->msg_id, idx->part_id[0], type, content_type_str, disposition, id,
-		    filename, description, encoding_strs[encoding],
-		    (long long)g_mime_stream_length(data_stream));
+		LOG("%u/%u: type '%s', content type '%s', disposition: '%s', "
+		    "id: '%s', filename: '%s', description: '%s', "
+		    "encoding: '%s', size: %lld\n",
+		    idx->msg_id, idx->part_id[0], type, content_type_str, disposition,
+		    id, filename, description,
+		    encoding_strs[encoding], (long long)g_mime_stream_length(data_stream));
 
 	free(content_type_str);
 
 	idx->part_id[0]++;
 }
 
-static void mar_extract_cb(GMimeObject *parent, GMimeObject *part, gpointer user_data)
-{
+static void mar_extract_cb(
+	GMimeObject *parent, GMimeObject *part, gpointer user_data
+) {
 	struct mar_idx *idx = user_data;
 
 	if (!GMIME_IS_PART(part)) {
@@ -277,6 +285,7 @@ static void mar_extract_cb(GMimeObject *parent, GMimeObject *part, gpointer user
 	} 
 
 	GMimeStream *ws = g_mime_data_wrapper_get_stream(w);
+
 	const char *filename = g_mime_part_get_filename(p);
 	if (!filename) {
 		LOG("skipping MIME part w/o filename, sz: %lld\n",
@@ -289,24 +298,31 @@ static void mar_extract_cb(GMimeObject *parent, GMimeObject *part, gpointer user
 
 	if (!mar_idx_find_filename(idx, filename)) {
 		if (verbosity > 0)
-			LOG("skipping non-mentioned MIME-part with filename '%s'\n", filename);
+			LOG("skipping non-mentioned MIME-part with filename '%s'\n",
+			    filename);
 		return;
 	}
 
 	if (strcmp(filename, filename_base))
-		LOG("stripping path from '%s' -> '%s'\n", filename, filename_base);
+		LOG("stripping path from '%s' -> '%s'\n",filename,filename_base);
 
-	struct stat st;
-	if (lstat(filename_base, &st)) {
-		if (errno != ENOENT)
-			FATAL(1,"error stat'ing output path '%s': %s\n", filename_base, strerror(errno));
-	} else if (overwrite == OVERWRITE_UNLINK) {
-		if (!S_ISREG(st.st_mode))
-			FATAL(1,"refusing to unlink existing non-regular '%s'\n", filename_base);
-		if (unlink(filename_base))
-			FATAL(1,"error unlinking '%s': '%s'\n", filename_base, strerror(errno));
-	} else if (overwrite != OVERWRITE_PLAIN) {
-		FATAL(1,"refusing to overwrite existing '%s'\n", filename_base);
+	if (!extract_to_stdout) {
+		struct stat st;
+		if (lstat(filename_base, &st)) {
+			if (errno != ENOENT)
+				FATAL(1,"error stat'ing output path '%s': %s\n",
+				      filename_base, strerror(errno));
+		} else if (overwrite == OVERWRITE_UNLINK) {
+			if (!S_ISREG(st.st_mode))
+				FATAL(1,"refusing to unlink existing non-regular '%s'\n",
+				      filename_base);
+			if (unlink(filename_base))
+				FATAL(1,"error unlinking '%s': '%s'\n",
+				      filename_base, strerror(errno));
+		} else if (overwrite != OVERWRITE_PLAIN) {
+			FATAL(1,"refusing to overwrite existing '%s'\n",
+			      filename_base);
+		}
 	}
 
 	if (verbosity > 0)
@@ -315,7 +331,8 @@ static void mar_extract_cb(GMimeObject *parent, GMimeObject *part, gpointer user
 	GMimeStream *s = g_mime_stream_filter_new(g_mime_data_wrapper_get_stream(w));
 	GMimeFilter *f = g_mime_filter_basic_new(g_mime_data_wrapper_get_encoding(w), FALSE);
 	g_mime_stream_filter_add(GMIME_STREAM_FILTER(s), f);
-	GMimeStream *o = g_mime_stream_file_new_for_path(filename_base, "wb");
+	GMimeStream *o = extract_to_stdout ? g_mime_stream_file_new(stdout)
+	                                   : g_mime_stream_file_new_for_path(filename_base, "wb");
 	if (!o)
 		FATAL(1,"error opening '%s' for writing: %s\n", filename_base, strerror(errno));
 	ssize_t r = g_mime_stream_write_to_stream(s, o);
@@ -430,7 +447,7 @@ int main(int argc, char **argv)
 			break;
 		case 'H': dereference_symlinks = 1; break;
 		case 'h': FATAL_DO(0,print_help());
-		case 'O': fout = stdout; break;
+		case 'O': extract_to_stdout = 1; break;
 //		case 'R': recurse_subdirs = 1; break;
 		case 'u': overwrite = OVERWRITE_UNLINK; break;
 		case 'U': overwrite = OVERWRITE_PLAIN; break;
@@ -509,11 +526,13 @@ int main(int argc, char **argv)
 			if (!(mar = g_mime_parser_construct_part(p)))
 				FATAL(1,"error reading input as MIME part\n");
 			if (GMIME_IS_MULTIPART(mar))
-				g_mime_multipart_foreach(GMIME_MULTIPART(mar), cb, &idx);
+				g_mime_multipart_foreach(GMIME_MULTIPART(mar),
+				                         cb, &idx);
 			else if (GMIME_IS_PART(mar))
 				cb(NULL, mar, &idx);
 			else
-				FATAL(1,"error: input is not a (multi)part MIME message\n");
+				FATAL(1,"error: input is not a (multi)part "
+				        "MIME message\n");
 			g_object_unref(mar);
 		}
 		g_object_unref(p);
