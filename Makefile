@@ -6,6 +6,10 @@ CFLAGS += `pkg-config --cflags $(PKGS)`
 LDFLAGS = `pkg-config --libs-only-{L,other} $(PKGS)`
 LDLIBS  = `pkg-config --libs-only-l $(PKGS)`
 
+# comment these two lines if libmagic(3) is not available
+CFLAGS += -DHAVE_LIBMAGIC
+LDLIBS += -lmagic
+
 PROGS   = mar
 
 all: $(PROGS)

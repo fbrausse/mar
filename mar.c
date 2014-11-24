@@ -7,10 +7,14 @@
 #include <sys/stat.h>		/* stat() */
 #include <libgen.h>		/* basename() */
 
+#if (HAVE_LIBMAGIC - 0)
+# include <magic.h>
+#endif
+
 #include <gio/gio.h>
 #include <gmime/gmime.h>
 
-#define DEFAULT_ENC		"quoted-printable"
+#define MAGIC_BUFFER_SZ		(64 * 1024)
 #define DEFAULT_MIMETYPE_TEXT	"text/plain"
 #define DEFAULT_MIMETYPE	"application/octet-stream"
 
@@ -57,6 +61,9 @@ static       char             *next_name     = NULL;
 static enum action             action    = ACTION_NONE;
 static enum overwrite          overwrite = OVERWRITE_NONE;
 static GMimeMessage           *msg = NULL;
+#if (HAVE_LIBMAGIC - 0)
+static magic_t                 magic = NULL;
+#endif
 
 #define OPT_ACTIONS	"ctx" /* "Ar" */
 #define OPT_FMODS	"C:d:e:im:n:"
@@ -88,9 +95,10 @@ static GMimePart * mar_create_part(char *path)
 {
 	GMimeStream *stream = NULL;
 	struct stat st;
+	int have_path = 0;
+	int can_seek = -1;
 	if (!strcmp(path, "-")) {
-		stream = g_mime_stream_buffer_new(g_mime_stream_file_new(stdin),
-		                                  GMIME_STREAM_BUFFER_CACHE_READ);
+		stream = g_mime_stream_file_new(stdin);
 	} else if ((dereference_symlinks ? stat : lstat)(path, &st)) {
 			FATAL(2,"error stat'ing path '%s' to input: %s\n",
 			      path,strerror(errno));
@@ -99,71 +107,137 @@ static GMimePart * mar_create_part(char *path)
 		      "to '-H' not specified\n", path);
 	} else if (S_ISREG(st.st_mode)) {
 		stream = g_mime_stream_file_new_for_path(path, "rb");
+		can_seek = 1;
+		have_path = 1;
 	} else if (S_ISFIFO(st.st_mode)) {
-		stream = g_mime_stream_buffer_new(g_mime_stream_file_new_for_path(path, "rb"),
-		                                  GMIME_STREAM_BUFFER_CACHE_READ);
+		stream = g_mime_stream_file_new_for_path(path, "rb");
+		can_seek = 0;
 	} else {
 		FATAL(1,"error: cannot handle non-regular file '%s'\n",
 		      path);
+	}
+	if (can_seek < 0)
+		can_seek = g_mime_stream_seek(stream, 0, GMIME_STREAM_SEEK_CUR) != -1;
+	if (!can_seek) {
+		stream = g_mime_stream_buffer_new(stream,
+		                                  GMIME_STREAM_BUFFER_CACHE_READ);
+		can_seek = 1;
 	}
 
 	GMimePart *part = g_mime_part_new();
 
 	const char *disposition;
-	if (!next_name)
-		next_name = basename(path);
 	if (next_inline)
 		disposition = GMIME_DISPOSITION_INLINE;
 	else {
 		disposition = GMIME_DISPOSITION_ATTACHMENT;
-		g_mime_part_set_filename(part, next_name);
+		if (have_path && !next_name)
+			next_name = basename(path);
+		if (next_name)
+			g_mime_part_set_filename(part, next_name);
 	}
 	g_mime_object_set_disposition(GMIME_OBJECT(part), disposition);
 
 	if (next_desc)
 		g_mime_part_set_content_description(part, next_desc);
 
-	GMimeDataWrapper *data = g_mime_data_wrapper_new_with_stream(stream,
-			GMIME_CONTENT_ENCODING_BINARY);
-	g_object_unref(stream);
-	g_mime_part_set_content_object(part, data);
-	g_object_unref(data);
-
 	int have_enc  = next_encoding != GMIME_CONTENT_ENCODING_DEFAULT;
 	int have_type = next_mimetype != NULL;
 	int have_cs   = next_charset  != NULL;
 
+static char magic_buf[MAGIC_BUFFER_SZ];
+	size_t magic_rd = 0;
+	while (!g_mime_stream_eos(stream) && sizeof(magic_buf) - magic_rd) {
+		ssize_t r = g_mime_stream_read(stream, magic_buf + magic_rd,
+					       sizeof(magic_buf) - magic_rd);
+		if (r < 0)
+			FATAL(1,"error reading '%s': %s\n",path,strerror(errno));
+		magic_rd += r;
+		if (!r)
+			break;
+	}
+
+	const char *magic_mimetype = NULL;
+	gchar *gio_content_type;
 	gboolean gio_content_type_uncertain;
-	gchar *gio_content_type = g_content_type_guess(path,NULL,0,&gio_content_type_uncertain);
+#if (HAVE_LIBMAGIC - 0)
+	if (magic) {
+		if (have_path)
+			magic_mimetype = magic_file(magic, path);
+		else
+			magic_mimetype = magic_buffer(magic, magic_buf, magic_rd);
+		if (!magic_mimetype)
+			LOG("libmagic error: %s\n", magic_error(magic));
+	}
+#endif
+	gio_content_type = g_content_type_guess(have_path ? path : NULL,
+	                                        (guchar *)magic_buf, magic_rd,
+	                                        &gio_content_type_uncertain);
 	gchar *gio_mime_type = g_content_type_get_mime_type(gio_content_type);
-	if (verbosity > 1)
+
+	GMimeDataWrapper *data = g_mime_data_wrapper_new_with_stream(stream,
+			GMIME_CONTENT_ENCODING_BINARY);
+	g_mime_part_set_content_object(part, data);
+	g_object_unref(data);
+	g_object_unref(stream);
+
+	if (verbosity > 1) {
+		if (magic_mimetype)
+			LOG("%s: libmagic reports mime-type '%s'\n",path,
+			    magic_mimetype);
 		LOG("%s: gio %s content-type '%s', mime-type '%s'\n",path,
 		    gio_content_type_uncertain ? "guesses" : "identifies",
 		    gio_content_type, gio_mime_type);
+	}
 
-	if (!have_type)
-		next_mimetype = next_inline || have_cs ? DEFAULT_MIMETYPE_TEXT : gio_mime_type;
+	const char *mt_certain = NULL;
+	if (!have_type) {
+		next_mimetype = magic_mimetype;
+		mt_certain = magic_mimetype;
+	}
+	if (!next_mimetype) {
+		next_mimetype = gio_mime_type;
+		mt_certain = gio_content_type_uncertain ? NULL : gio_mime_type;
+	}
 
 	GMimeContentType *mt = g_mime_content_type_new_from_string(next_mimetype);
-	GMimeContentType *gio_mt = g_mime_content_type_new_from_string(gio_mime_type);
 	const char *mt1 = g_mime_content_type_get_media_type(mt);
-	const char *mt2 = g_mime_content_type_get_media_type(gio_mt);
 	const char *mst1 = g_mime_content_type_get_media_subtype(mt);
-	const char *mst2 = g_mime_content_type_get_media_subtype(gio_mt);
-	if (!gio_content_type_uncertain
+	if ((next_inline || have_cs) && mt_certain && strcmp(mt1, "text"))
+		LOG("%s: warning: declared with %s, but discovered mime-type is non-text '%s'\n",
+		    path,next_inline ? have_cs ? "-i/-c" : "-i" : "-c",
+		    next_mimetype);
+
+	GMimeContentType *c_mt = g_mime_content_type_new_from_string(mt_certain);
+	const char *mt2 = g_mime_content_type_get_media_type(c_mt);
+	const char *mst2 = g_mime_content_type_get_media_subtype(c_mt);
+	if (mt_certain
 	    && (strcmp(mt1, mt2)
 	        || ((verbosity > 1 || strncmp(mst2, "x-", 2) || !strncmp(mst1, "x-", 2))
-	            && strcmp(gio_mime_type, next_mimetype))))
-		LOG("%s: warning: gio identified mime-type '%s' instead of '%s'\n",
-		    path,gio_mime_type,next_mimetype);
-	g_object_unref(gio_mt);
+	            && strcmp(mt_certain, next_mimetype))))
+		LOG("%s: warning: identified mime-type '%s' instead of '%s'\n",
+		    path,mt_certain,next_mimetype);
+	g_object_unref(c_mt);
 	g_free(gio_content_type);
 	g_free(gio_mime_type);
 
-	if (!have_cs)
-		next_charset = g_mime_locale_charset();
-	if (!strcmp("text", g_mime_content_type_get_media_type(mt)))
+	if (!strcmp("text", mt1)) {
+		const char *cs = g_mime_content_type_get_parameter(mt, "charset");
+		if (have_cs && cs && strcmp(next_charset, cs)) {
+			LOG("%s: warning: declared charset '%s' but identified '%s'\n",
+			    path,next_charset,cs);
+		} else if (!have_cs) {
+			next_charset = cs ? cs : g_mime_locale_charset();
+			if (verbosity > 1)
+				LOG("%s: using charset '%s'\n",path,next_charset);
+		}
 		g_mime_content_type_set_parameter(mt, "charset", next_charset);
+	}
+	if (verbosity > 0) {
+		char *mts = g_mime_content_type_to_string(mt);
+		LOG("%s: using content-type '%s'\n",path,mts);
+		free(mts);
+	}
 	g_mime_object_set_content_type(GMIME_OBJECT(part), mt);
 	g_object_unref(mt);
 
@@ -388,7 +462,7 @@ OPTS are any of:\n\
   -P POST  use POST as multipart postface text\n\
   -s SUBJ  insert a 'Subject'-Header\n\
   -t TO    mail address of recipient, insert as 'To'-Header\n\
-  -u       unlink existing files before writing\n\
+  -u       unlink existing (regular) files before writing\n\
   -U       overwrite (and don't unlink) existing files during extraction\n\
            (unsafe: this makes a difference for existing symlinks)\n\
   -v       verbose mode of operation, use twice for greater effect\n\
@@ -399,10 +473,9 @@ FMODS are any of:\n\
            '%s'\n\
   -d DESC  use string DESC as Content-Description MIME header value\n\
   -e ENC   specifies the content-transfer-encoding to use: 7bit, 8bit, binary,\n\
-           base64, quoted-printable, uuencode;\n\
-           defaults to '" DEFAULT_ENC "' for TYPE 'text/*', 'base64' otherwise\n\
+           base64, quoted-printable, uuencode; still subject to -078\n\
   -i       disposition this part as 'inline', implies 'text/plain' (if not set)\n\
-  -m TYPE  specifies the MIME-type of following file argument (only for -c, -r);\n\
+  -m TYPE  specifies the MIME-type of following file argument (only for -c);\n\
            if not given, it will be guessed using libmagic(3) (if available) or\n\
            GIO (if available), defaults to '" DEFAULT_MIMETYPE "' except\n\
            for the case described for option '-e'\n\
@@ -424,11 +497,40 @@ static void print_help(void)
 	print_usage();
 	fprintf(stderr, "\n");
 	fprintf(stderr, HELP_MSG, g_mime_locale_charset());
+	fprintf(stderr, "\nCompiled with:\n");
+#if (HAVE_LIBMAGIC - 0)
+	fprintf(stderr, "\tlibmagic header %d.%d / library %d.%d\n",
+		MAGIC_VERSION / 100, MAGIC_VERSION % 100,
+		magic_version() / 100, magic_version() % 100);
+#endif
+	fprintf(stderr, "\tglib header %d.%d.%d / library %d.%d.%d\n",
+		GLIB_MAJOR_VERSION, GLIB_MINOR_VERSION, GLIB_MICRO_VERSION,
+		glib_major_version, glib_minor_version, glib_micro_version);
+	fprintf(stderr, "\tgmime header %d.%d.%d / library %d.%d.%d\n",
+		GMIME_MAJOR_VERSION, GMIME_MINOR_VERSION, GMIME_MICRO_VERSION,
+		gmime_major_version, gmime_minor_version, gmime_micro_version);
 }
 
 int main(int argc, char **argv)
 {
 	progname = argv[0];
+
+#if (HAVE_LIBMAGIC - 0)
+	magic = magic_open(
+		MAGIC_MIME_TYPE | MAGIC_MIME_ENCODING | MAGIC_RAW |
+		MAGIC_ERROR | MAGIC_NO_CHECK_COMPRESS | MAGIC_NO_CHECK_ELF |
+		MAGIC_NO_CHECK_TAR
+	);
+	if (!magic)
+		LOG("error initializing libmagic: %s\n",
+		    strerror(errno));
+	else if (magic_load(magic, NULL)) {
+		LOG("warning: error initializing libmagic default database: %s\n",
+		    magic_error(magic));
+		magic_close(magic);
+		magic = NULL;
+	}
+#endif
 
 	g_mime_init(0);
 	atexit(g_mime_shutdown);
@@ -513,7 +615,7 @@ int main(int argc, char **argv)
 		case '?': FATAL(1,"unknown option '-%c'\n", optopt);
 		}
 		if (next_arg_f && optind != oldind) {
-			if (optind >= argc)
+			if (oldind == 1 && optind >= argc)
 				FATAL(1,"option '-%c' expects a parameter\n",
 				      next_arg_f);
 			char *arg = oldind == 1 ? argv[optind++] : optarg;
