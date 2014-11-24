@@ -109,7 +109,7 @@ static GMimePart * mar_create_part(char *path)
 		stream = g_mime_stream_file_new_for_path(path, "rb");
 		can_seek = 1;
 		have_path = 1;
-	} else if (S_ISFIFO(st.st_mode)) {
+	} else if (S_ISFIFO(st.st_mode) || S_ISCHR(st.st_mode)) {
 		stream = g_mime_stream_file_new_for_path(path, "rb");
 		can_seek = 0;
 	} else {
@@ -231,7 +231,9 @@ static char magic_buf[MAGIC_BUFFER_SZ];
 			if (verbosity > 1)
 				LOG("%s: using charset '%s'\n",path,next_charset);
 		}
-		g_mime_content_type_set_parameter(mt, "charset", next_charset);
+		/* workaround bug in gmime: free's cs before strdup'ing next_charset */
+		if (next_charset != cs)
+			g_mime_content_type_set_parameter(mt, "charset", next_charset);
 	}
 	if (verbosity > 0) {
 		char *mts = g_mime_content_type_to_string(mt);
