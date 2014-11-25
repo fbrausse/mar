@@ -1,0 +1,10 @@
+Features
+~~~~~~~~
+- S/MIME + OpenPGP encryption/signing
+- implement actions -Ar
+- implement recursion into directories
+- add MD5 checksum header
+
+Bugs
+~~~~
+- fix '--' option handling
