@@ -100,8 +100,8 @@ static GMimePart * mar_create_part(char *path)
 	if (!strcmp(path, "-")) {
 		stream = g_mime_stream_file_new(stdin);
 	} else if ((dereference_symlinks ? stat : lstat)(path, &st)) {
-			FATAL(2,"error stat'ing path '%s' to input: %s\n",
-			      path,strerror(errno));
+		FATAL(2,"error stat'ing path '%s' to input: %s\n",
+		      path,strerror(errno));
 	} else if (S_ISLNK(st.st_mode)) {
 		FATAL(1,"refusing to handle symlink '%s' due "
 		      "to '-H' not specified\n", path);
@@ -149,7 +149,7 @@ static char magic_buf[MAGIC_BUFFER_SZ];
 	size_t magic_rd = 0;
 	while (!g_mime_stream_eos(stream) && sizeof(magic_buf) - magic_rd) {
 		ssize_t r = g_mime_stream_read(stream, magic_buf + magic_rd,
-					       sizeof(magic_buf) - magic_rd);
+		                               sizeof(magic_buf) - magic_rd);
 		if (r < 0)
 			FATAL(1,"error reading '%s': %s\n",path,strerror(errno));
 		magic_rd += r;
@@ -208,16 +208,18 @@ static char magic_buf[MAGIC_BUFFER_SZ];
 		    path,next_inline ? have_cs ? "-i/-c" : "-i" : "-c",
 		    next_mimetype);
 
-	GMimeContentType *c_mt = g_mime_content_type_new_from_string(mt_certain);
-	const char *mt2 = g_mime_content_type_get_media_type(c_mt);
-	const char *mst2 = g_mime_content_type_get_media_subtype(c_mt);
-	if (mt_certain
-	    && (strcmp(mt1, mt2)
-	        || ((verbosity > 1 || strncmp(mst2, "x-", 2) || !strncmp(mst1, "x-", 2))
-	            && strcmp(mt_certain, next_mimetype))))
-		LOG("%s: warning: identified mime-type '%s' instead of '%s'\n",
-		    path,mt_certain,next_mimetype);
-	g_object_unref(c_mt);
+	if (mt_certain) {
+		GMimeContentType *c_mt = g_mime_content_type_new_from_string(mt_certain);
+		const char *mt2 = g_mime_content_type_get_media_type(c_mt);
+		const char *mst2 = g_mime_content_type_get_media_subtype(c_mt);
+		if (mt_certain
+		    && (strcmp(mt1, mt2)
+		        || ((verbosity > 1 || strncmp(mst2, "x-", 2) || !strncmp(mst1, "x-", 2))
+		            && strcmp(mt_certain, next_mimetype))))
+			LOG("%s: warning: identified mime-type '%s' instead of '%s'\n",
+			    path,mt_certain,next_mimetype);
+		g_object_unref(c_mt);
+	}
 	g_free(gio_content_type);
 	g_free(gio_mime_type);
 
@@ -450,7 +452,7 @@ ACTION is one of:\n\
   -x       extract contents of MIME message\n\
 \n\
 OPTS are any of:\n\
-  -0       encode for binary-safe channel, don't force any encoding\n\
+  -0       'encode' for binary-safe channel, don't force any encoding\n\
   -7       encode for 7bit channel, encode data 7bit-clean; this is the default\n\
   -8       encode for 8bit channel, just encode embedded zeros\n\
   -b BCC   \n\
@@ -499,10 +501,10 @@ static void print_help(void)
 	print_usage();
 	fprintf(stderr, "\n");
 	fprintf(stderr, HELP_MSG, g_mime_locale_charset());
-	fprintf(stderr, "\nCompiled with:\n");
+	fprintf(stderr, "\nCompiled / linked with:\n");
 #if (HAVE_LIBMAGIC - 0)
 	fprintf(stderr, "\tlibmagic header %d.%d / library %d.%d\n",
-		MAGIC_VERSION / 100, MAGIC_VERSION % 100,
+		MAGIC_VERSION   / 100, MAGIC_VERSION   % 100,
 		magic_version() / 100, magic_version() % 100);
 #endif
 	fprintf(stderr, "\tglib header %d.%d.%d / library %d.%d.%d\n",
@@ -524,7 +526,7 @@ int main(int argc, char **argv)
 		MAGIC_NO_CHECK_TAR
 	);
 	if (!magic)
-		LOG("error initializing libmagic: %s\n",
+		LOG("warning: error initializing libmagic: %s\n",
 		    strerror(errno));
 	else if (magic_load(magic, NULL)) {
 		LOG("warning: error initializing libmagic default database: %s\n",
