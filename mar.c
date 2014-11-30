@@ -8,6 +8,7 @@
 #include <libgen.h>		/* basename() */
 #include <stdint.h>		/* uint32_t */
 #include <strings.h>		/* strncasecmp() */
+#include <sys/stat.h>		/* lstat() */
 
 #if (HAVE_LIBMAGIC - 0)
 # include <magic.h>
@@ -118,7 +119,7 @@ static int                     dereference_symlinks = 0;
 static int                     verbosity = 0;
 static int                     extract_to_stdout = 0;
 static int                     sign          = 0;
-static int                     crypt         = 0;
+static int                     do_crypt      = 0;
 static GPtrArray              *recipients    = NULL;
 static GMimeDigestAlgo         digest        = GMIME_DIGEST_ALGO_DEFAULT;
 static GMimeCryptoContext     *crypto_ctx    = NULL;
@@ -168,11 +169,11 @@ static GMimePart * mar_create_part(char *path)
 		FATAL(1,"refusing to handle symlink '%s' due "
 		      "to '-H' not specified\n", path);
 	} else if (S_ISREG(st.st_mode)) {
-		stream = g_mime_stream_file_new_for_path(path, "rb");
+		stream = g_mime_stream_file_new(fopen(path, "rb"));
 		can_seek = 1;
 		have_path = 1;
 	} else if (S_ISFIFO(st.st_mode) || S_ISCHR(st.st_mode)) {
-		stream = g_mime_stream_file_new_for_path(path, "rb");
+		stream = g_mime_stream_file_new(fopen(path, "rb"));
 		can_seek = 0;
 	} else {
 		FATAL(1,"error: cannot handle non-regular file '%s'\n",
@@ -320,7 +321,7 @@ static char magic_buf[MAGIC_BUFFER_SZ];
 
 static GMimeObject * mar_create(int argc, char **argv, const char *user_id)
 {
-	GMimeMultipart *mpart = crypt ? GMIME_MULTIPART(g_mime_multipart_encrypted_new())
+	GMimeMultipart *mpart = do_crypt ? GMIME_MULTIPART(g_mime_multipart_encrypted_new())
 	                      : sign ? GMIME_MULTIPART(g_mime_multipart_signed_new())
 	                      : g_mime_multipart_new();
 	if (boundary)
@@ -335,7 +336,7 @@ static GMimeObject * mar_create(int argc, char **argv, const char *user_id)
 		GMimePart *part = mar_create_part(path);
 		int r = 0;
 		GError *err = NULL;
-		if (crypt)
+		if (do_crypt)
 			r = g_mime_multipart_encrypted_encrypt(GMIME_MULTIPART_ENCRYPTED(mpart),
 			                                       GMIME_OBJECT(part),
 			                                       crypto_ctx,
@@ -355,7 +356,7 @@ static GMimeObject * mar_create(int argc, char **argv, const char *user_id)
 			g_mime_multipart_add(mpart, GMIME_OBJECT(part));
 		if (r)
 			FATAL(1,"%s: %s failed (%d): %s\n",path,
-			      crypt ? "encrypting" : "signing",
+			      do_crypt ? "encrypting" : "signing",
 			      err->code,err->message);
 
 		next_charset = NULL;
@@ -515,7 +516,7 @@ static void mar_extract_cb(
 	GMimeFilter *f = g_mime_filter_basic_new(g_mime_data_wrapper_get_encoding(w), FALSE);
 	g_mime_stream_filter_add(GMIME_STREAM_FILTER(s), f);
 	GMimeStream *o = extract_to_stdout ? g_mime_stream_file_new(stdout)
-	                                   : g_mime_stream_file_new_for_path(filename_base, "wb");
+	                                   : g_mime_stream_file_new(fopen(filename_base, "wb"));
 	if (!o)
 		FATAL(1,"error opening '%s' for writing: %s\n", filename_base, strerror(errno));
 	ssize_t r = g_mime_stream_write_to_stream(s, o);
@@ -670,6 +671,7 @@ int main(int argc, char **argv)
 		magic_close(magic);
 		magic = NULL;
 	}
+	errno = 0;
 #endif
 
 	g_mime_init(0);
@@ -726,7 +728,7 @@ int main(int argc, char **argv)
 				FATAL(1,"invalid mode of operation: not creating a MIME message\n");
 			g_mime_message_add_recipient(msg, GMIME_RECIPIENT_TYPE_BCC, NULL, optarg);
 			break;
-		case 'E': crypt = 1; break;
+		case 'E': do_crypt = 1; break;
 		case 'f':
 			if (fstr)
 				FATAL(1,"only one specification of '-f' is supported\n");
@@ -781,7 +783,7 @@ int main(int argc, char **argv)
 			break;
 	}
 
-	if (sign || crypt) {
+	if (sign || do_crypt) {
 		if (smime) {
 			crypto_ctx = g_mime_pkcs7_context_new(mar_pwd_request_cb);
 		} else {
@@ -792,7 +794,7 @@ int main(int argc, char **argv)
 #endif
 		}
 		if (!crypto_ctx)
-			FATAL(1,"error: unable to create %s crypto context\n",
+			FATAL(1,"error: unable to create %s crypto context, does gmime support it?\n",
 			      smime ? "PKCS#7" : "GnuPG");
 	}
 
@@ -804,7 +806,7 @@ int main(int argc, char **argv)
 	case ACTION_CREATE: {
 		if (sign && !g_mime_message_get_sender(msg))
 			FATAL(1,"error: signed message (-S) needs a known sender (-F)\n");
-		if (crypt) {
+		if (do_crypt) {
 			recipients = g_ptr_array_new();
 			mar_extract_recipients(g_mime_message_get_recipients(msg, GMIME_RECIPIENT_TYPE_TO));
 			mar_extract_recipients(g_mime_message_get_recipients(msg, GMIME_RECIPIENT_TYPE_CC));
@@ -818,7 +820,7 @@ int main(int argc, char **argv)
 
 		g_mime_message_set_mime_part(msg, mar);
 
-		s = fstr ? g_mime_stream_file_new_for_path(fstr, "wb")
+		s = fstr ? g_mime_stream_file_new(fopen(fstr, "wb"))
 		         : g_mime_stream_file_new(stdout);
 
 		g_mime_object_encode(GMIME_OBJECT(msg), encoding_constraint);
@@ -843,7 +845,7 @@ int main(int argc, char **argv)
 		break;*/
 	case ACTION_LIST:
 	case ACTION_EXTRACT: {
-		s = fstr ? g_mime_stream_file_new_for_path(fstr, "rb")
+		s = fstr ? g_mime_stream_file_new(fopen(fstr, "rb"))
 		         : g_mime_stream_file_new(stdin);
 		if (!s)
 			FATAL(1,"error opening '%s' for reading: %s\n",
@@ -861,7 +863,7 @@ int main(int argc, char **argv)
 				FATAL(1,"error reading input as MIME part\n");
 			GError *err = NULL;
 			if (GMIME_IS_MULTIPART_ENCRYPTED(mar)) {
-				if (crypt) {
+				if (do_crypt) {
 					GMimeObject *dec = g_mime_multipart_encrypted_decrypt(
 							GMIME_MULTIPART_ENCRYPTED(mar),
 							crypto_ctx, NULL, &err);
@@ -880,7 +882,7 @@ int main(int argc, char **argv)
 					continue;
 				}
 			} else if (GMIME_IS_MULTIPART_SIGNED(mar)) {
-				if (crypt || sign) {
+				if (do_crypt || sign) {
 					GMimeSignatureList *l = g_mime_multipart_signed_verify(
 							GMIME_MULTIPART_SIGNED(mar),
 							crypto_ctx, &err);
