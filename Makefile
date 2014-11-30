@@ -1,7 +1,7 @@
 
 PKGS    = gio-2.0 gmime-2.6
 
-CFLAGS  = -std=c99 -O2 -Wall -pedantic -D_POSIX_C_SOURCE=200809L
+CFLAGS  = -std=c99 -O2 -Wall -pedantic -D_POSIX_C_SOURCE=200809L -DMAR_GPG_BINARY_PATH="\"`which gpg`\""
 CFLAGS += `pkg-config --cflags $(PKGS)`
 LDFLAGS = `pkg-config --libs-only-{L,other} $(PKGS)`
 LDLIBS  = `pkg-config --libs-only-l $(PKGS)`

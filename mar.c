@@ -6,6 +6,8 @@
 #include <unistd.h>		/* getopt() */
 #include <sys/stat.h>		/* stat() */
 #include <libgen.h>		/* basename() */
+#include <stdint.h>		/* uint32_t */
+#include <strings.h>		/* strncasecmp() */
 
 #if (HAVE_LIBMAGIC - 0)
 # include <magic.h>
@@ -33,15 +35,81 @@ enum overwrite {
 	OVERWRITE_PLAIN,
 };
 
-static const char *const encoding_strs[] = {
-	[GMIME_CONTENT_ENCODING_7BIT           ] = "7bit",
-	[GMIME_CONTENT_ENCODING_8BIT           ] = "8bit",
-	[GMIME_CONTENT_ENCODING_BINARY         ] = "binary",
-	[GMIME_CONTENT_ENCODING_BASE64         ] = "base64",
-	[GMIME_CONTENT_ENCODING_QUOTEDPRINTABLE] = "quoted-printable",
-	[GMIME_CONTENT_ENCODING_UUENCODE       ] = "uuencode",
-//	[GMIME_CONTENT_ENCODING_               ] = "yencode",
+struct strmap {
+	unsigned v;
+	const char *s;
 };
+
+static const struct strmap encoding_strs[] = {
+	{ GMIME_CONTENT_ENCODING_7BIT           , "7bit" },
+	{ GMIME_CONTENT_ENCODING_8BIT           , "8bit" },
+	{ GMIME_CONTENT_ENCODING_BINARY         , "binary" },
+	{ GMIME_CONTENT_ENCODING_BASE64         , "base64" },
+	{ GMIME_CONTENT_ENCODING_QUOTEDPRINTABLE, "quoted-printable" },
+	{ GMIME_CONTENT_ENCODING_UUENCODE       , "uuencode" },
+//	{ GMIME_CONTENT_ENCODING_               , "yencode" },
+};
+
+static const struct strmap pubkeyalog_strs[] = {
+	{ GMIME_PUBKEY_ALGO_RSA  , "rsa" },
+	{ GMIME_PUBKEY_ALGO_RSA_E, "enc-rsa" },
+	{ GMIME_PUBKEY_ALGO_RSA_S, "sign-rsa" },
+	{ GMIME_PUBKEY_ALGO_ELG_E, "enc-elgamal" },
+	{ GMIME_PUBKEY_ALGO_DSA  , "dsa" },
+	{ GMIME_PUBKEY_ALGO_ELG  , "elgamal" },
+};
+
+static const struct strmap digestalgo_strs[] = {
+	{ GMIME_DIGEST_ALGO_MD5      , "md5" },
+	{ GMIME_DIGEST_ALGO_SHA1     , "sha-1" },
+	{ GMIME_DIGEST_ALGO_RIPEMD160, "ripemd-160" },
+	{ GMIME_DIGEST_ALGO_MD2      , "md2" },
+	{ GMIME_DIGEST_ALGO_TIGER192 , "tiger-192" },
+	{ GMIME_DIGEST_ALGO_HAVAL5160, "haval5-160" },
+	{ GMIME_DIGEST_ALGO_SHA256   , "sha-256" },
+	{ GMIME_DIGEST_ALGO_SHA384   , "sha-384" },
+	{ GMIME_DIGEST_ALGO_SHA512   , "sha-512" },
+	{ GMIME_DIGEST_ALGO_SHA224   , "sha-224" },
+	{ GMIME_DIGEST_ALGO_MD4      , "md4" },
+};
+
+static const struct strmap certtrust_strs[] = {
+	{ GMIME_CERTIFICATE_TRUST_NONE     , "none" },
+	{ GMIME_CERTIFICATE_TRUST_NEVER    , "never" },
+	{ GMIME_CERTIFICATE_TRUST_UNDEFINED, "undefined" },
+	{ GMIME_CERTIFICATE_TRUST_MARGINAL , "marginal" },
+	{ GMIME_CERTIFICATE_TRUST_FULLY    , "fully" },
+	{ GMIME_CERTIFICATE_TRUST_ULTIMATE , "ultimate" },
+};
+
+static unsigned strmap_get_by_prefix(
+	const struct strmap *map, size_t sz, const char *str, const char *desc
+) {
+	const struct strmap *ret = NULL;
+	unsigned len = strlen(str);
+	for (; sz; sz--, map++) {
+		if (!strncasecmp(map->s, str, len))
+			continue;
+		if (ret)
+			FATAL(1,"%s '%s' is ambiguous\n",desc,str);
+		ret = map;
+	}
+	if (!ret)
+		FATAL(1,"unknown %s '%s'\n",desc,str);
+	return ret->v;
+}
+
+static const char * strmap_find_by_val(
+	const struct strmap *map, size_t sz, unsigned v
+) {
+	for (; sz; sz--, map++)
+		if (map->v == v)
+			return map->s;
+	return NULL;
+}
+
+#define STRMAP_GET_BY_PREFIX(map,str,desc)	strmap_get_by_prefix(map,ARRAY_SIZE(map),str,desc)
+#define STRMAP_FIND_BY_VAL(map,v)		strmap_find_by_val(map,ARRAY_SIZE(map),v)
 
 static const char             *progname;
 static GMimeEncodingConstraint encoding_constraint = GMIME_ENCODING_CONSTRAINT_7BIT;
@@ -49,6 +117,11 @@ static int                     dereference_symlinks = 0;
 //static int recurse_subdirs = 0;
 static int                     verbosity = 0;
 static int                     extract_to_stdout = 0;
+static int                     sign          = 0;
+static int                     crypt         = 0;
+static GPtrArray              *recipients    = NULL;
+static GMimeDigestAlgo         digest        = GMIME_DIGEST_ALGO_DEFAULT;
+static GMimeCryptoContext     *crypto_ctx    = NULL;
 static const char             *preface       = NULL;
 static const char             *postface      = NULL;
 static const char             *boundary      = NULL;
@@ -77,18 +150,7 @@ static void set_action(enum action a)
 
 static void set_encoding(const char *e)
 {
-	next_encoding = GMIME_CONTENT_ENCODING_DEFAULT;
-	for (unsigned i=0; i<ARRAY_SIZE(encoding_strs); i++) {
-		if (!encoding_strs[i])
-			continue;
-		if (strstr(encoding_strs[i], e) != encoding_strs[i])
-			continue;
-		if (next_encoding != GMIME_CONTENT_ENCODING_DEFAULT)
-			FATAL(1,"encoding '%s' is ambiguous\n",e);
-		next_encoding = i;
-	}
-	if (next_encoding == GMIME_CONTENT_ENCODING_DEFAULT)
-		FATAL(1,"unknown encoding '%s'\n",e);
+	next_encoding = STRMAP_GET_BY_PREFIX(encoding_strs,e,"encoding");
 }
 
 static GMimePart * mar_create_part(char *path)
@@ -248,16 +310,19 @@ static char magic_buf[MAGIC_BUFFER_SZ];
 	if (!have_enc) {
 		next_encoding = g_mime_part_get_best_content_encoding(part, encoding_constraint);
 		if (verbosity > 0 && next_encoding != GMIME_CONTENT_ENCODING_DEFAULT)
-			LOG("%s: using content-encoding '%s'\n",path,encoding_strs[next_encoding]);
+			LOG("%s: using content-encoding '%s'\n",path,
+			    STRMAP_FIND_BY_VAL(encoding_strs,next_encoding));
 	}
 	g_mime_part_set_content_encoding(part, next_encoding);
 
 	return part;
 }
 
-static GMimeObject * mar_create(int argc, char **argv)
+static GMimeObject * mar_create(int argc, char **argv, const char *user_id)
 {
-	GMimeMultipart *mpart = g_mime_multipart_new();
+	GMimeMultipart *mpart = crypt ? GMIME_MULTIPART(g_mime_multipart_encrypted_new())
+	                      : sign ? GMIME_MULTIPART(g_mime_multipart_signed_new())
+	                      : g_mime_multipart_new();
 	if (boundary)
 		g_mime_multipart_set_boundary(mpart, boundary);
 	if (preface)
@@ -266,8 +331,32 @@ static GMimeObject * mar_create(int argc, char **argv)
 		g_mime_multipart_set_postface(mpart, postface);
 
 	do {
-		GMimePart *part = mar_create_part(argv[optind++]);
-		g_mime_multipart_add(mpart, GMIME_OBJECT(part));
+		char *path = argv[optind++];
+		GMimePart *part = mar_create_part(path);
+		int r = 0;
+		GError *err = NULL;
+		if (crypt)
+			r = g_mime_multipart_encrypted_encrypt(GMIME_MULTIPART_ENCRYPTED(mpart),
+			                                       GMIME_OBJECT(part),
+			                                       crypto_ctx,
+			                                       sign,
+			                                       user_id,
+			                                       digest,
+			                                       recipients,
+			                                       &err);
+		else if (sign)
+			r = g_mime_multipart_signed_sign(GMIME_MULTIPART_SIGNED(mpart),
+			                                 GMIME_OBJECT(part),
+			                                 crypto_ctx,
+			                                 user_id,
+			                                 digest,
+			                                 &err);
+		else
+			g_mime_multipart_add(mpart, GMIME_OBJECT(part));
+		if (r)
+			FATAL(1,"%s: %s failed (%d): %s\n",path,
+			      crypt ? "encrypting" : "signing",
+			      err->code,err->message);
 
 		next_charset = NULL;
 		next_desc = NULL;
@@ -338,8 +427,8 @@ static void mar_list_cb(
 		description = g_mime_part_get_content_description(GMIME_PART(part));
 		encoding = g_mime_part_get_content_encoding(GMIME_PART(part));
 		filename = g_mime_part_get_filename(GMIME_PART(part));
-		data_stream = g_mime_data_wrapper_get_stream(
-				g_mime_part_get_content_object(GMIME_PART(part)));
+		GMimeDataWrapper *data_wrapper = g_mime_part_get_content_object(GMIME_PART(part));
+		data_stream = data_wrapper ? g_mime_data_wrapper_get_stream(data_wrapper) : NULL;
 	} else if (GMIME_IS_MULTIPART(part))
 		type = "multipart";
 	else if(GMIME_IS_MESSAGE_PART(part))
@@ -348,10 +437,12 @@ static void mar_list_cb(
 	if (verbosity > 0 || (filename && mar_idx_find_filename(idx, filename)))
 		LOG("%u/%u: type '%s', content type '%s', disposition: '%s', "
 		    "id: '%s', filename: '%s', description: '%s', "
-		    "encoding: '%s', size: %lld\n",
+		    "encoding: '%s', "
+		    "size: %lld\n",
 		    idx->msg_id, idx->part_id[0], type, content_type_str, disposition,
 		    id, filename, description,
-		    encoding_strs[encoding], (long long)g_mime_stream_length(data_stream));
+		    STRMAP_FIND_BY_VAL(encoding_strs,encoding),
+		    data_stream ? (long long)g_mime_stream_length(data_stream) : -1LL);
 
 	free(content_type_str);
 
@@ -445,6 +536,16 @@ extract: %s [-]x[OPTS] [-OPTS] [--] [MEMBER [MEMBER [...]]]\n\
   -A       append / concatenate MIME messages\n\
   -r       append files to MIME message, parameters mean the same as for '-c'\n\
   -R       enable recursion into directories instead of aborting\n\*/
+
+#ifdef MAR_GPG_BINARY_PATH
+# define HELP_MSG_GPG	"\
+  -g       use RFC 2440 (OpenPGP) instead of RFC 2633 (PKCS#7, default) format\n"
+# define OPT_GPG	"g"
+#else
+# define HELP_MSG_GPG
+# define OPT_GPG
+#endif
+
 #define HELP_MSG	"\
 ACTION is one of:\n\
   -c       create MIME message from files\n\
@@ -458,13 +559,18 @@ OPTS are any of:\n\
   -b BCC   \n\
   -B BOUN  explicitely specify 'boundary' delimiter of the MIME message\n\
   -c CC    \n\
+  -D DIGA  use digest algorithm DIGA\n\
+  -E       en-/decrypt message content (requires -t for encryption)\n\
   -f FILE  read/write MIME message from/to FILE instead of stdin/stdout\n\
+  -F FROM  mail address of sender, set as 'From' header\n" \
+HELP_MSG_GPG "\
   -h       display this help message\n\
   -H       dereference symbolic links instead of aborting\n\
   -O       extract files to stdout\n\
   -p PRE   use PRE as multipart preface text\n\
   -P POST  use POST as multipart postface text\n\
   -s SUBJ  insert a 'Subject'-Header\n\
+  -S       add/verify signature (requires -F for signing)\n\
   -t TO    mail address of recipient, insert as 'To'-Header\n\
   -u       unlink existing (regular) files before writing\n\
   -U       overwrite (and don't unlink) existing files during extraction\n\
@@ -513,6 +619,36 @@ static void print_help(void)
 	fprintf(stderr, "\tgmime header %d.%d.%d / library %d.%d.%d\n",
 		GMIME_MAJOR_VERSION, GMIME_MINOR_VERSION, GMIME_MICRO_VERSION,
 		gmime_major_version, gmime_minor_version, gmime_micro_version);
+#ifdef MAR_GPG_BINARY_PATH
+	fprintf(stderr, "\tGnuPG binary path: %s\n", MAR_GPG_BINARY_PATH);
+#endif
+}
+
+static void mar_extract_recipients(InternetAddressList *l)
+{
+	unsigned n = internet_address_list_length(l);
+	for (unsigned i=0; i<n; i++) {
+		InternetAddress *a = internet_address_list_get_address(l, i);
+		if (INTERNET_ADDRESS_IS_GROUP(a)) {
+			InternetAddressGroup *g = INTERNET_ADDRESS_GROUP(a);
+			mar_extract_recipients(internet_address_group_get_members(g));
+		} else {
+			if (!INTERNET_ADDRESS_IS_MAILBOX(a)) {
+				char *s = internet_address_to_string(a, FALSE);
+				LOG("warning: cannot encrypt for non-mailbox internet address '%s'\n",s);
+				free(s);
+			}
+			InternetAddressMailbox *m = INTERNET_ADDRESS_MAILBOX(a);
+			g_ptr_array_add(recipients, (void *)internet_address_mailbox_get_addr(m));
+		}
+	}
+}
+
+static gboolean mar_pwd_request_cb(
+	GMimeCryptoContext *ctx, const char *user_id, const char *prompt_ctx,
+	gboolean reprompt, GMimeStream *response, GError **err
+) {
+	return FALSE;
 }
 
 int main(int argc, char **argv)
@@ -551,11 +687,13 @@ int main(int argc, char **argv)
 	}
 
 	char *fstr = NULL;
+	int smime = 1;
 	int opt;
 	for (int next_arg_f = 0;;) {
 		int oldind = optind;
-		opt = getopt(argc, argv, optind == 1 ? ":078BfhHOpPsuUv" OPT_ACTIONS
-		                                     : ":078B:b:c:f:hHOup:P:s:t:Uv" OPT_FMODS);
+		opt = getopt(argc, argv,
+		             optind == 1 ? ":078BDEfF" OPT_GPG "hHOpPsSuUv" OPT_ACTIONS
+		                         : ":078BD:Eb:c:f:F:" OPT_GPG "hHOup:P:s:St:Uv" OPT_FMODS);
 		switch (opt) {
 		/* actions */
 //		case 'A': set_action(ACTION_CONCAT); break;
@@ -588,21 +726,26 @@ int main(int argc, char **argv)
 				FATAL(1,"invalid mode of operation: not creating a MIME message\n");
 			g_mime_message_add_recipient(msg, GMIME_RECIPIENT_TYPE_BCC, NULL, optarg);
 			break;
+		case 'E': crypt = 1; break;
 		case 'f':
 			if (fstr)
 				FATAL(1,"only one specification of '-f' is supported\n");
 		case 'B':
+		case 'D':
+		case 'F':
 		case 'p':
 		case 'P':
 		case 's':
 			if (next_arg_f)
-				FATAL(1,"only one of '-BfpPs' may be specified in the first parameter\n");
+				FATAL(1,"only one of '-BDfFpPs' may be specified in the first parameter\n");
 			next_arg_f = opt;
 			break;
+		case 'g': smime = 0; break;
 		case 'H': dereference_symlinks = 1; break;
 		case 'h': FATAL_DO(0,print_help());
 		case 'O': extract_to_stdout = 1; break;
 //		case 'R': recurse_subdirs = 1; break;
+		case 'S': sign = 1; break;
 		case 'u': overwrite = OVERWRITE_UNLINK; break;
 		case 'U': overwrite = OVERWRITE_PLAIN; break;
 		case 'v': verbosity++; break;
@@ -625,7 +768,9 @@ int main(int argc, char **argv)
 			char *arg = oldind == 1 ? argv[optind++] : optarg;
 			switch (next_arg_f) {
 			case 'B': boundary = arg; break;
+			case 'D': digest = STRMAP_GET_BY_PREFIX(digestalgo_strs,arg,"digest algorithm"); break;
 			case 'f': fstr     = arg; break;
+			case 'F': g_mime_message_set_sender(msg, arg); break;
 			case 'p': preface  = arg; break;
 			case 'P': postface = arg; break;
 			case 's': g_mime_message_set_subject(msg, arg); break;
@@ -636,16 +781,40 @@ int main(int argc, char **argv)
 			break;
 	}
 
+	if (sign || crypt) {
+		if (smime) {
+			crypto_ctx = g_mime_pkcs7_context_new(mar_pwd_request_cb);
+		} else {
+#ifdef MAR_GPG_BINARY_PATH
+			crypto_ctx = g_mime_gpg_context_new(mar_pwd_request_cb, MAR_GPG_BINARY_PATH);
+#else
+			FATAL(1,"%s compiled without MAR_GPG_BINARY_PATH, no OpenPGP support\n",progname);
+#endif
+		}
+		if (!crypto_ctx)
+			FATAL(1,"error: unable to create %s crypto context\n",
+			      smime ? "PKCS#7" : "GnuPG");
+	}
+
 	GMimeObject *mar;
 	GMimeStream *s;
 	switch (action) {
 	case ACTION_NONE:
 		FATAL(1,"no action specified, need one of -" OPT_ACTIONS "\n");
 	case ACTION_CREATE: {
+		if (sign && !g_mime_message_get_sender(msg))
+			FATAL(1,"error: signed message (-S) needs a known sender (-F)\n");
+		if (crypt) {
+			recipients = g_ptr_array_new();
+			mar_extract_recipients(g_mime_message_get_recipients(msg, GMIME_RECIPIENT_TYPE_TO));
+			mar_extract_recipients(g_mime_message_get_recipients(msg, GMIME_RECIPIENT_TYPE_CC));
+			mar_extract_recipients(g_mime_message_get_recipients(msg, GMIME_RECIPIENT_TYPE_BCC));
+			if (!recipients->len)
+				FATAL(1,"error: encrypting a message (-E) needs known recipients (-t, -c or -b)\n");
+		}
 		if (optind >= argc)
 			FATAL(1,"error: refusing to create empty MIME message\n");
-
-		mar = mar_create(argc, argv);
+		mar = mar_create(argc, argv, g_mime_message_get_sender(msg));
 
 		g_mime_message_set_mime_part(msg, mar);
 
@@ -690,6 +859,102 @@ int main(int argc, char **argv)
 		for (; !g_mime_parser_eos(p); idx.msg_id++) {
 			if (!(mar = g_mime_parser_construct_part(p)))
 				FATAL(1,"error reading input as MIME part\n");
+			GError *err = NULL;
+			if (GMIME_IS_MULTIPART_ENCRYPTED(mar)) {
+				if (crypt) {
+					GMimeObject *dec = g_mime_multipart_encrypted_decrypt(
+							GMIME_MULTIPART_ENCRYPTED(mar),
+							crypto_ctx, NULL, &err);
+					g_object_unref(mar);
+					if (!dec) {
+						FATAL_IF(action == ACTION_EXTRACT,1,
+						         "error decrypting MIME part: %s\n",err->message);
+						g_error_free(err);
+						continue;
+					}
+					mar = dec;
+				} else {
+					FATAL_IF(action == ACTION_EXTRACT,1,
+					         "error decrypting MIME part due to missing -E\n");
+					g_object_unref(mar);
+					continue;
+				}
+			} else if (GMIME_IS_MULTIPART_SIGNED(mar)) {
+				if (crypt || sign) {
+					GMimeSignatureList *l = g_mime_multipart_signed_verify(
+							GMIME_MULTIPART_SIGNED(mar),
+							crypto_ctx, &err);
+					if (err) {
+						FATAL_IF(action == ACTION_EXTRACT,1,
+						         "error verifying signed MIME part: %s\n",
+						         err->message);
+						g_error_free(err);
+						g_object_unref(mar);
+						continue;
+					}
+					unsigned n = g_mime_signature_list_length(l);
+					unsigned sign_ok = 0;
+					for (unsigned i=0; i<n; i++) {
+						GMimeSignature *s = g_mime_signature_list_get_signature(l, i);
+						GMimeCertificate *c = g_mime_signature_get_certificate(s);
+						if (verbosity > 1) {
+							static char ctime_buf1[128], ctime_buf2[128];
+							struct tm cre_tm, exp_tm;
+							time_t cre = g_mime_certificate_get_created(c);
+							time_t exp = g_mime_certificate_get_expires(c);
+							if (cre == -1 || !strftime(ctime_buf1, sizeof(ctime_buf1), "%c", localtime_r(&cre, &cre_tm)))
+								sprintf(ctime_buf1, "<unknown>");
+							if (exp == -1 || !strftime(ctime_buf2, sizeof(ctime_buf2), "%c", localtime_r(&exp, &exp_tm)))
+								sprintf(ctime_buf2, "<unknown>");
+							LOG("signature cert: key: %s, digest: %s, issuer: '%s', serial: %s, fprint: %s, key id: %s, valid %s til %s, name: '%s', email: %s\n",
+							    STRMAP_FIND_BY_VAL(pubkeyalog_strs,g_mime_certificate_get_pubkey_algo(c)),
+							    STRMAP_FIND_BY_VAL(digestalgo_strs,g_mime_certificate_get_digest_algo(c)),
+							    g_mime_certificate_get_issuer_name(c),
+							    g_mime_certificate_get_issuer_serial(c),
+							    g_mime_certificate_get_fingerprint(c),
+							    g_mime_certificate_get_key_id(c),
+							    ctime_buf1, ctime_buf2,
+							    g_mime_certificate_get_name(c),
+							    g_mime_certificate_get_email(c));
+						}
+						switch (g_mime_signature_get_status(s)) {
+						case GMIME_SIGNATURE_STATUS_GOOD:
+							sign_ok++;
+							break;
+						case GMIME_SIGNATURE_STATUS_BAD:
+						case GMIME_SIGNATURE_STATUS_ERROR:
+							if (!verbosity)
+								break;
+							uint32_t errs = g_mime_signature_get_errors(s);
+							LOG("error verifying signature:");
+							do switch ((GMimeSignatureError)(errs & -errs)) {
+							case GMIME_SIGNATURE_ERROR_NONE: fprintf(stderr, " none"); break;
+							case GMIME_SIGNATURE_ERROR_EXPSIG: fprintf(stderr, " expired"); break;
+							case GMIME_SIGNATURE_ERROR_NO_PUBKEY: fprintf(stderr, " no-public-key"); break;
+							case GMIME_SIGNATURE_ERROR_EXPKEYSIG: fprintf(stderr, " key-expired"); break;
+							case GMIME_SIGNATURE_ERROR_REVKEYSIG: fprintf(stderr, " key-revoked"); break;
+							case GMIME_SIGNATURE_ERROR_UNSUPP_ALGO: fprintf(stderr, " algorithm-unsupported"); break;
+							default: fprintf(stderr, " unknown"); break;
+							} while ((errs ^= errs & -errs));
+							fprintf(stderr, "\n");
+							break;
+						}
+					}
+					g_object_unref(l);
+					if (sign_ok == n) {
+						if (verbosity)
+							LOG("successfully verified all %u signatures for MIME part\n", sign_ok);
+					} else {
+						if (verbosity)
+							LOG("verification of %u / %u signatures failed\n", n - sign_ok, n);
+						if (action == ACTION_EXTRACT)
+							FATAL(1,"error: not all signatures could be verified\n");
+					}
+				} else {
+					FATAL_IF(action == ACTION_EXTRACT,1,
+					         "error verifying signed MIME part due to missing -S\n");
+				}
+			}
 			if (GMIME_IS_MULTIPART(mar))
 				g_mime_multipart_foreach(GMIME_MULTIPART(mar),
 				                         cb, &idx);

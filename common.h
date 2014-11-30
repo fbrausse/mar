@@ -40,6 +40,7 @@
 #endif
 #define FATAL_DO(ret,...)	do { {__VA_ARGS__;} exit(ret); } while (0)
 #define FATAL(ret,...)		FATAL_DO(ret,LOG(__VA_ARGS__))
+#define FATAL_IF(cond,ret,...)	do { if (cond) FATAL(ret,__VA_ARGS__); else LOG(__VA_ARGS__); } while (0)
 
 #include <sys/types.h>		/* ssize_t */
 #include <stdlib.h>		/* malloc(), etc. */
